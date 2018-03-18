@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/unistd.h>
+#include <sys/stat.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
@@ -25,6 +28,10 @@
 #include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
+#include "esp_vfs_fat.h"
+#include "driver/sdmmc_host.h"
+#include "driver/sdspi_host.h"
+#include "sdmmc_cmd.h"
 
 #define BT_AV_TAG               "BT_AV"
 
@@ -84,6 +91,8 @@ static uint32_t m_pkt_cnt = 0;
 
 TimerHandle_t tmr;
 
+int m_sample = 0;
+
 static char *bda2str(esp_bd_addr_t bda, char *str, size_t size)
 {
     if (bda == NULL || str == NULL || size < 18) {
@@ -105,6 +114,32 @@ void app_main()
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK( ret );
+
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+    gpio_set_pull_mode(15, GPIO_PULLUP_ONLY);   // CMD, needed in 4- and 1- line modes
+    gpio_set_pull_mode(2, GPIO_PULLUP_ONLY);    // D0, needed in 4- and 1-line modes
+    gpio_set_pull_mode(4, GPIO_PULLUP_ONLY);    // D1, needed in 4-line mode only
+    gpio_set_pull_mode(12, GPIO_PULLUP_ONLY);   // D2, needed in 4-line mode only
+    gpio_set_pull_mode(13, GPIO_PULLUP_ONLY);   // D3, needed in 4- and 1-line modes
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024
+    };
+
+    sdmmc_card_t* card;
+    ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
+
+    if (ret != ESP_OK) {
+        return;
+    }
+
+    sdmmc_card_print_info(stdout, card);
+    m_sample = open("/sdcard/smb.pcm", O_RDONLY);
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 
@@ -202,10 +237,10 @@ static void filter_inquiry_scan_result(esp_bt_gap_cb_param_t *param)
         return;
     }
 
-    /* search for device named "ESP_SPEAKER" in its extended inqury response */
+    /* search for device named "BT SPEAKER" in its extended inqury response */
     if (eir) {
         get_name_from_eir(eir, peer_bdname, NULL);
-        if (strcmp((char *)peer_bdname, "ESP_SPEAKER") != 0) {
+        if (strcmp((char *)peer_bdname, "BT SPEAKER") != 0) {
             return;
         }
 
@@ -303,13 +338,10 @@ static int32_t bt_app_a2d_data_cb(uint8_t *data, int32_t len)
         return 0;
     }
 
-    // generate random sequence
-    int val = rand() % (1 << 16);
-    for (int i = 0; i < (len >> 1); i++) {
-        data[(i << 1)] = val & 0xff;
-        data[(i << 1) + 1] = (val >> 8) & 0xff;
+    int l = read(m_sample, data, len);
+    if (l < len) {
+        lseek(m_sample, 0, SEEK_SET);
     }
-
     return len;
 }
 
